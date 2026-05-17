@@ -116,11 +116,7 @@ fn colorize_json(text: &str) -> Vec<Line<'static>> {
         buf.push_str(line);
         buf.push('\n');
         if let Ok(val) = serde_json::from_str::<Value>(buf.trim()) {
-            let pretty =
-                serde_json::to_string_pretty(&val).unwrap_or_else(|_| buf.trim().to_owned());
-            for pline in pretty.lines() {
-                out.push(colorize_line(pline));
-            }
+            value_to_lines(&val, 0, &mut out, false);
             buf.clear();
         }
     }
@@ -132,64 +128,108 @@ fn colorize_json(text: &str) -> Vec<Line<'static>> {
     out
 }
 
-fn colorize_line(line: &str) -> Line<'static> {
-    let trimmed = line.trim_end_matches(',');
-    let has_comma = trimmed.len() < line.len();
-    let trimmed_val = trimmed.trim();
-
-    if trimmed_val.is_empty() || matches!(trimmed_val, "{" | "}" | "[" | "]") {
-        return Line::from(Span::raw(line.to_owned()));
-    }
-
-    if let Some(sep_start) = trimmed.find(r#""": "#) {
-        let before = &trimmed[..sep_start + 1];
-        let after = &trimmed[sep_start + 3..];
-
-        if before.trim().starts_with('"') {
-            let indent = &line[..line.len() - line.trim_start().len()];
-            let mut spans: Vec<Span<'static>> = vec![
-                Span::raw(indent.to_owned()),
-                Span::styled(before.trim().to_owned(), Style::default().fg(Color::Cyan)),
-                Span::raw(": "),
-            ];
-            spans.extend(colorize_value_str(after.trim()));
-            if has_comma {
-                spans.push(Span::raw(","));
+fn value_to_lines(val: &Value, indent: usize, out: &mut Vec<Line<'static>>, skip_brackets: bool) {
+    match val {
+        Value::Object(map) => {
+            if !skip_brackets {
+                out.push(Line::from(Span::raw(format!("{}{{", " ".repeat(indent * 2)))));
             }
-            return Line::from(spans);
+            for (i, (k, v)) in map.iter().enumerate() {
+                let mut spans: Vec<Span<'static>> = Vec::new();
+                spaces(indent + 1, &mut spans);
+                spans.push(Span::styled(
+                    format!("\"{k}\""),
+                    Style::default().fg(Color::Cyan),
+                ));
+                spans.push(Span::raw(": "));
+                match v {
+                    Value::Object(_) | Value::Array(_) => {
+                        let ch = if matches!(v, Value::Object(_)) { '{' } else { '[' };
+                        spans.push(Span::raw(ch.to_string()));
+                        if i < map.len() - 1 { spans.push(Span::raw(",")); }
+                        out.push(Line::from(spans));
+                        value_to_lines(v, indent + 2, out, true);
+                        let mut close_spans = Vec::new();
+                        spaces(indent + 1, &mut close_spans);
+                        let close_ch = if matches!(v, Value::Object(_)) { '}' } else { ']' };
+                        close_spans.push(Span::raw(close_ch.to_string()));
+                        out.push(Line::from(close_spans));
+                    }
+                    _ => {
+                        value_spans(v, &mut spans);
+                        if i < map.len() - 1 { spans.push(Span::raw(",")); }
+                        out.push(Line::from(spans));
+                    }
+                }
+            }
+            if !skip_brackets {
+                out.push(Line::from(Span::raw(format!("{}}}", " ".repeat(indent * 2)))));
+            }
+        }
+        Value::Array(arr) => {
+            if !skip_brackets {
+                out.push(Line::from(Span::raw(format!("{}[", " ".repeat(indent * 2)))));
+            }
+            for (i, v) in arr.iter().enumerate() {
+                let mut spans: Vec<Span<'static>> = Vec::new();
+                spaces(indent + 1, &mut spans);
+                match v {
+                    Value::Object(_) | Value::Array(_) => {
+                        let ch = if matches!(v, Value::Object(_)) { '{' } else { '[' };
+                        spans.push(Span::raw(ch.to_string()));
+                        if i < arr.len() - 1 { spans.push(Span::raw(",")); }
+                        out.push(Line::from(spans));
+                        value_to_lines(v, indent + 2, out, true);
+                        let mut close_spans = Vec::new();
+                        spaces(indent + 1, &mut close_spans);
+                        let close_ch = if matches!(v, Value::Object(_)) { '}' } else { ']' };
+                        close_spans.push(Span::raw(close_ch.to_string()));
+                        out.push(Line::from(close_spans));
+                    }
+                    _ => {
+                        value_spans(v, &mut spans);
+                        if i < arr.len() - 1 { spans.push(Span::raw(",")); }
+                        out.push(Line::from(spans));
+                    }
+                }
+            }
+            if !skip_brackets {
+                out.push(Line::from(Span::raw(format!("{}]", " ".repeat(indent * 2)))));
+            }
+        }
+        other => {
+            let mut spans = Vec::new();
+            spaces(indent, &mut spans);
+            value_spans(other, &mut spans);
+            out.push(Line::from(spans));
         }
     }
-
-    let indent = &line[..line.len() - line.trim_start().len()];
-    let mut spans: Vec<Span<'static>> = vec![Span::raw(indent.to_owned())];
-    spans.extend(colorize_value_str(trimmed_val));
-    if has_comma {
-        spans.push(Span::raw(","));
-    }
-    Line::from(spans)
 }
 
-fn colorize_value_str(val: &str) -> Vec<Span<'static>> {
-    if val.is_empty() || matches!(val, "{" | "}" | "[" | "]") {
-        return vec![Span::raw(val.to_owned())];
-    }
-    match serde_json::from_str::<Value>(val) {
-        Ok(Value::String(s)) => {
-            vec![Span::styled(format!("\"{s}\""), Style::default().fg(Color::Green))]
-        }
-        Ok(Value::Number(n)) => {
-            vec![Span::styled(n.to_string(), Style::default().fg(Color::Yellow))]
-        }
-        Ok(Value::Bool(b)) => {
-            vec![Span::styled(b.to_string(), Style::default().fg(Color::Magenta))]
-        }
-        Ok(Value::Null) => vec![Span::styled(
-            "null".to_owned(),
+fn value_spans(val: &Value, spans: &mut Vec<Span<'static>>) {
+    match val {
+        Value::Null => spans.push(Span::styled(
+            "null",
             Style::default().fg(Color::Magenta).add_modifier(Modifier::ITALIC),
-        )],
-        Ok(Value::Array(_) | Value::Object(_)) => {
-            vec![Span::styled(val.to_owned(), Style::default().fg(Color::White))]
-        }
-        Err(_) => vec![Span::raw(val.to_owned())],
+        )),
+        Value::Bool(b) => spans.push(Span::styled(
+            b.to_string(),
+            Style::default().fg(Color::Magenta),
+        )),
+        Value::Number(n) => spans.push(Span::styled(
+            n.to_string(),
+            Style::default().fg(Color::Yellow),
+        )),
+        Value::String(s) => spans.push(Span::styled(
+            format!("\"{s}\""),
+            Style::default().fg(Color::Green),
+        )),
+        _ => unreachable!(),
+    }
+}
+
+fn spaces(n: usize, spans: &mut Vec<Span<'static>>) {
+    if n > 0 {
+        spans.push(Span::raw(" ".repeat(n * 2)));
     }
 }
